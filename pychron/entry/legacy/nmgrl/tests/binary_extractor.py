@@ -5,6 +5,10 @@ __author__ = "ross"
 
 import unittest
 
+from pychron.entry.legacy.nmgrl.mass_spec_binary_extractor import (
+    MassSpecBinaryExtractor,
+)
+
 
 class Expected(object):
     runid = "59273-01A"

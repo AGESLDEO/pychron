@@ -50,11 +50,9 @@ class AnalysisPointInspector(PointInspector):
         return ctx_menu
 
     def normal_right_down(self, event):
-        print("nsdo", event, self.current_position)
         self._selected_indices = []
         if self.current_position:
             inds = self.get_selected_index()
-            print("insdf", inds)
             if inds is not None:
                 self._selected_indices = list(inds)
                 self._show_menu(event)
@@ -80,15 +78,11 @@ class AnalysisPointInspector(PointInspector):
             ai.trigger_recall()
 
     def _show_menu(self, event):
-        self.get_contextual_menu()
-
         control = event.window.control
 
         menu_manager = self.get_contextual_menu()
         menu = menu_manager.create_menu(control, None)
-
         menu.show()
-        menu_manager.destroy()
         event.handled = True
 
     def assemble_lines(self):
@@ -131,7 +125,7 @@ class AnalysisPointInspector(PointInspector):
                             if self.value_format:
                                 y = self.value_format(y)
 
-                            y = u"{} {} {} {}".format(y, PLUSMINUS, ye, pe)
+                            y = "{} {} {} {}".format(y, PLUSMINUS, ye, pe)
                         except IndexError as e:
                             print("asdf", e)
 
@@ -140,9 +134,9 @@ class AnalysisPointInspector(PointInspector):
                             y = self.value_format(y)
 
                     info = [
-                        u"Analysis= {} UUID({})".format(rid, analysis.display_uuid),
-                        u"Tag= {}".format(analysis.tag),
-                        u"{}= {}".format(name, y),
+                        "Analysis= {} UUID({})".format(rid, analysis.display_uuid),
+                        "Tag= {}".format(analysis.tag),
+                        "{}= {}".format(name, y),
                     ]
 
                     if self.include_x:
@@ -156,18 +150,16 @@ class AnalysisPointInspector(PointInspector):
                                 xe = xerror[ind]
                                 pe = self.percent_error(x, xe)
 
-                                x = u"{} {} {} {}".format(
-                                    floatfmt(x), PLUSMINUS, xe, pe
-                                )
+                                x = "{} {} {} {}".format(floatfmt(x), PLUSMINUS, xe, pe)
                             except IndexError as e:
                                 print("asdf", e)
                         else:
                             x = floatfmt(x)
 
-                        info.append(u"{}= {}".format(xname, x))
+                        info.append("{}= {}".format(xname, x))
 
                     if analysis.comment:
-                        info.insert(1, u"Comment= {}".format(analysis.comment[:20]))
+                        info.insert(1, "Comment= {}".format(analysis.comment[:20]))
 
                     if hasattr(analysis, "status_text"):
                         info.insert(1, "Status= {}".format(analysis.status_text))

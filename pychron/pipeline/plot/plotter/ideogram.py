@@ -601,7 +601,7 @@ class Ideogram(BaseArArFigure):
         else:
             name = ia
 
-        return lambda i, x, y, ai: u"{}= {}".format(name, ai.value_string(ia))
+        return lambda i, x, y, ai: "{}= {}".format(name, ai.value_string(ia))
 
     def _plot_relative_probability(self, po, plot, pid):
         graph = self.graph
@@ -770,6 +770,7 @@ class Ideogram(BaseArArFigure):
                         line,
                         data_point=(xi, yi),
                         label_text=txt,
+                        font=opt.label_font,
                         border_visible=bool(border),
                         border_width=border,
                         border_color=border_color,
@@ -786,12 +787,12 @@ class Ideogram(BaseArArFigure):
                     s = self.options.nsigma
                     es = self.options.error_bar_nsigma
                     ts.append(
-                        u"Mean: {} {} {}{} Data: {} {}{}".format(
+                        "Mean: {} {} {}{} Data: {} {}{}".format(
                             m, PLUSMINUS, s, SIGMA, PLUSMINUS, es, SIGMA
                         )
                     )
                 if self.options.show_error_type_info:
-                    ts.append(u"Error Type: {}".format(self.options.error_calc_method))
+                    ts.append("Error Type: {}".format(self.options.error_calc_method))
 
                 if ts:
                     self._add_info_label(plot, ts)
@@ -958,7 +959,7 @@ class Ideogram(BaseArArFigure):
             }
 
             tag = f.format(**ctx)
-            text = u"{} {}".format(tag, text)
+            text = "{} {}".format(tag, text)
         return text
 
     def _get_xs(self, key="age", nonsorted=False):

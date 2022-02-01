@@ -54,6 +54,7 @@ ATTR_MAPPING = {
     EXTRACT_VALUE: "extract_value",
     EXTRACT_DURATION: "extract_duration",
     CLEANUP: "cleanup",
+    "F": "uF",
 }
 
 AR4039 = "Ar40/Ar39"
@@ -231,6 +232,11 @@ class BaseSeries(BaseArArFigure):
             #     mi, mx = min(ys - 2 * yerr), max(ys + 2 * yerr)
             #     graph.set_y_limits(min_=mi, max_=mx, pad='0.1', plotid=pid)
 
+            if self.options.guides:
+                for gi in self.options.guides:
+                    if gi.visible and gi.should_plot(pid):
+                        graph.add_guide(gi.value, **gi.to_kwargs(), plotid=pid)
+
         except (KeyError, ZeroDivisionError, AttributeError) as e:
             import traceback
 
@@ -311,7 +317,7 @@ class BaseSeries(BaseArArFigure):
         if self.group_id == 0:
             if self.options.show_info:
                 ts = [
-                    u"Data {}{}{}".format(
+                    "Data {}{}{}".format(
                         PLUSMINUS, self.options.error_bar_nsigma, SIGMA
                     )
                 ]

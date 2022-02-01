@@ -20,10 +20,13 @@ import os
 import time
 from datetime import datetime
 from operator import itemgetter
-from threading import Thread, Lock, currentThread
+from queue import Queue, Empty
+from threading import Thread, Lock, currentThread, Event as TEvent
 
 from pyface.constant import CANCEL, YES, NO
 from pyface.timer.do_later import do_after
+from sqlalchemy.exc import DatabaseError
+from traitsui.api import View, EnumEditor, Item, UItem
 from traits.api import (
     Event,
     String,
@@ -49,7 +52,9 @@ from pychron.core.codetools.memory_usage import mem_available
 from pychron.core.helpers.filetools import add_extension, get_path, unique_path2
 from pychron.core.helpers.iterfuncs import groupby_key
 from pychron.core.helpers.logger_setup import add_root_handler, remove_root_handler
+from pychron.core.helpers.traitsui_shortcuts import okcancel_view
 from pychron.core.progress import open_progress
+from pychron.core.pychron_traits import PositiveInteger
 from pychron.core.stats import calculate_weighted_mean, calculate_mswd
 from pychron.core.ui.gui import invoke_in_main_thread
 from pychron.core.wait.wait_group import WaitGroup
@@ -82,7 +87,14 @@ from pychron.experiment.utilities.repository_identifier import (
 )
 from pychron.extraction_line.ipyscript_runner import IPyScriptRunner
 from pychron.globals import globalv
+from pychron.options.options_manager import SeriesOptionsManager, OptionsController
+from pychron.options.views.views import view
 from pychron.paths import paths
+from pychron.pipeline.plot.editors.series_editor import (
+    SeriesEditor,
+    AnalysisGroupedSeriesEditor,
+)
+from pychron.pipeline.plot.plotter.series import Series
 from pychron.pychron_constants import (
     DEFAULT_INTEGRATION_TIME,
     AR_AR,
@@ -100,6 +112,7 @@ from pychron.pychron_constants import (
     CANCELED,
     TRUNCATED,
     SUCCESS,
+    ARGON_KEYS,
 )
 
 
@@ -181,6 +194,14 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
     scheduler = Instance(ExperimentScheduler)
 
     events = List
+
+    timeseries_editor = Instance(AnalysisGroupedSeriesEditor)
+    timeseries_editor_button = Event
+    # configure_timeseries_editor_button = Event
+    # timeseries_options = Instance(SeriesOptionsManager)
+    timeseries_n_recall = PositiveInteger(50)
+    timeseries_mass_spectrometer = Str
+    timeseries_mass_spectrometers = List
     # ===========================================================================
     #
     # ===========================================================================
@@ -251,6 +272,8 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
     def __init__(self, *args, **kw):
         super(ExperimentExecutor, self).__init__(*args, **kw)
         self.wait_control_lock = Lock()
+        self._exception_queue = Queue()
+        self._save_complete_evt = TEvent()
         # self.set_managers()
         # self.notification_manager = NotificationManager()
 
@@ -373,7 +396,22 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         self.queue_modified = True
 
     def is_alive(self):
-        return self.alive
+        try:
+            exc = self._exception_queue.get_nowait()
+            self.warning("exception queue. {}".format(exc))
+            if exc[0] == "NonFatal":
+                if self.confirmation_dialog(
+                    "{}\n\nDo you want to CANCEL the experiment?\n".format(exc[1]),
+                    timeout_ret=False,
+                    timeout=30,
+                ):
+                    return False
+            else:
+                self.critical("exception kills experiment queue")
+                return False
+
+        except Empty:
+            return self.alive
 
     def continued(self):
         self.stats.continue_run()
@@ -468,6 +506,7 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
             exp = self.experiment_queue
 
         ctx = {
+            "current_run_duration": self.stats.current_run_duration_f,
             "etf_iso": self.stats.etf_iso,
             "err_message": self._err_message,
             "canceled": self._canceled,
@@ -711,7 +750,11 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
 
                     self.info("overlaping")
 
-                    t = Thread(target=self._do_run, args=(run,), name=run.runid)
+                    t = Thread(
+                        target=self._do_run,
+                        args=(run, delay_after_previous_analysis),
+                        name=run.runid,
+                    )
                     t.start()
 
                     run.wait_for_overlap()
@@ -723,7 +766,7 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
                 else:
                     is_first_flag = True
                     last_runid = run.runid
-                    self._join_run(spec, run)
+                    self._join_run(spec, run, delay_after_previous_analysis)
 
                 # self.tracker.stats.print_summary()
 
@@ -832,9 +875,9 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         ct = currentThread()
         ct.name = name
 
-    def _join_run(self, spec, run):
+    def _join_run(self, spec, run, delay_after_run):
         self.debug("join run")
-        self._do_run(run)
+        self._do_run(run, delay_after_run)
 
         self.debug("{} finished".format(run.runid))
         if self.is_alive():
@@ -865,7 +908,7 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
 
             self._prev_baselines = run.get_baselines()
 
-    def _do_run(self, run):
+    def _do_run(self, run, delay_after_run):
         self._set_thread_name(run.runid)
         # add a new log handler
 
@@ -888,6 +931,11 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         run.is_last = len(q.cleaned_automated_runs) == 1
 
         self.extracting_run = run
+
+        self.debug("waiting for save event to clear")
+        while self._save_evt.is_set():
+            self._save_evt.wait(1)
+        self.debug("waiting complete")
 
         for step in ("_start", "_extraction", "_measurement", "_post_measurement"):
 
@@ -917,8 +965,14 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
             if run.spec.state not in (TRUNCATED, CANCELED, FAILED):
                 run.spec.state = SUCCESS
 
+        self._do_event(events.SAVE_RUN, run=run)
         if self.save_all_runs or run.spec.state in ("success", "truncated"):
-            run.save()
+            # this needs to be non-blocking
+            run.save(
+                exception_queue=self._exception_queue,
+                complete_event=self._save_complete_evt,
+            )
+            self._save_complete_evt.set()
 
         self.run_completed = run
 
@@ -931,6 +985,13 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
                 self.warning("post run check failed")
             else:
                 self.heading("Post Run Check Passed")
+
+                # update the timeseries graph
+                try:
+                    self._update_timeseries()
+                except BaseException:
+                    self.debug("failed updating timeseries via experiment")
+                    self.debug_exception()
 
         t = time.time() - st
         self.info(
@@ -964,7 +1025,7 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         # close conditionals view
         # self._close_cv()
 
-        self._do_event(events.END_RUN, run=run)
+        self._do_event(events.END_RUN, run=run, delay_after_run=delay_after_run)
 
         remove_root_handler(handler)
         run.post_finish()
@@ -1217,9 +1278,8 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         ai: AutomatedRun
         extraction step
         """
-        if self._pre_extraction_check(ai):
-            self.heading("Pre Extraction Check Failed")
-            self._err_message = "Pre Extraction Check Failed"
+        if self._pre_step_check(ai, "Extraction"):
+            self._failed_execution_step("Pre Extraction Check Failed")
             return
 
         # make sure status monitor is running a
@@ -1244,6 +1304,10 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         ai: AutomatedRun
         measurement step
         """
+        if self._pre_step_check(ai, "Measurement"):
+            self._failed_execution_step("Pre Measurement Check Failed")
+            return
+
         if self.send_config_before_run:
             self.info("Sending spectrometer configuration")
             man = self.spectrometer_manager
@@ -1283,6 +1347,7 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
     def _failed_execution_step(self, msg):
         self.debug("failed execution step {}".format(msg))
         if not self._canceled:
+            self.heading(msg)
             self._err_message = msg
             self.alive = False
         return False
@@ -2026,16 +2091,21 @@ class ExperimentExecutor(Consoleable, PreferenceMixin):
         self.debug("pre execute check complete")
         return True
 
-    def _pre_extraction_check(self, run):
+    def _pre_step_check(self, run, tag):
+
         """
         do pre_run_terminations
+
+        return True to fail
         """
 
         if not self.alive:
             return
 
         self.debug(
-            "============================= Pre Extraction Check ============================="
+            "============================= Pre {} Check =============================".format(
+                tag
+            )
         )
 
         conditionals = self._load_queue_conditionals("pre_run_terminations")
@@ -2517,9 +2587,59 @@ Use Last "blank_{}"= {}
         # invoke_in_main_thread(self.trait_set, extraction_state_label=msg,
         #                       extraction_state_color=color)
 
+    def _update_timeseries(self):
+        if self.use_dvc_persistence:
+            dvc = self.datahub.mainstore
+            with dvc.session_ctx():
+                if self.experiment_queue:
+                    ms = self.experiment_queue.mass_spectrometer
+                else:
+                    if not self.timeseries_mass_spectrometers:
+                        self.timeseries_mass_spectrometers = (
+                            dvc.get_mass_spectrometer_names()
+                        )
+
+                    info = self.edit_traits(
+                        view=okcancel_view(
+                            UItem(
+                                "timeseries_mass_spectrometer",
+                                # label='Mass Spectrometer',
+                                editor=EnumEditor(name="timeseries_mass_spectrometers"),
+                            ),
+                            title="Please Select a Mass Spectrometer",
+                            width=300,
+                        )
+                    )
+                    if info.result:
+                        ms = self.timeseries_mass_spectrometer
+                    else:
+                        return
+                ans = dvc.get_last_n_analyses(
+                    self.timeseries_n_recall,
+                    mass_spectrometer=ms,
+                    exclude_types=("unknown",),
+                    verbose=False,
+                )
+                ans = dvc.make_analyses(ans, use_progress=False)
+
+                self.timeseries_editor.set_items(ans)
+                invoke_in_main_thread(self.timeseries_editor.refresh)
+
     # ===============================================================================
     # handlers
     # ===============================================================================
+    def _timeseries_editor_button_fired(self):
+        self._update_timeseries()
+
+    # def _configure_timeseries_editor_button_fired(self):
+    #
+    #     info = OptionsController(model=self.timeseries_options).edit_traits(
+    #         view=view("Timeseries Options"), kind="livemodal"
+    #     )
+    #     if info.result:
+    #         self.timeseries_editor.set_options(self.timeseries_options.selected_options)
+    #         self.timeseries_editor.refresh()
+
     def _measuring_run_changed(self):
         if self.measuring_run:
             self.measuring_run.is_last = self.end_at_run_completion
@@ -2586,6 +2706,20 @@ Use Last "blank_{}"= {}
     # ===============================================================================
     # defaults
     # ===============================================================================
+    # def _timeseries_options_default(self):
+    #     opt = SeriesOptionsManager()
+    #     opt.set_names_via_keys(ARGON_KEYS)
+    #     return opt
+
+    def _timeseries_editor_default(self):
+        ed = AnalysisGroupedSeriesEditor()
+        ed.init(
+            atypes=["air", "cocktail", "blank_unknown", "blank_air", "blank_cocktail"]
+        )
+        # ed.set_options(self.timeseries_options.selected_options)
+
+        return ed
+
     def _dashboard_client_default(self):
         if self.use_dashboard_client:
             return self.application.get_service(

@@ -15,6 +15,7 @@ class StageMapTestCase(unittest.TestCase):
             p = os.path.join(base, "data", "221-hole.txt")
 
         self.sm = LaserStageMap(file_path=p)
+        self.sm.load()
 
     def test_generate_interpolation(self):
         sm = self.sm
@@ -245,7 +246,7 @@ class TransformTestCase(unittest.TestCase):
         pt = 1, 0
         tpt = transform_point(pt, cpos, rot, 1)
 
-        r2 = 0.5 ** 0.5
+        r2 = 0.5**0.5
         self.assertAlmostEqual(r2, tpt[0])
         self.assertAlmostEqual(r2, tpt[1])
 
@@ -256,7 +257,7 @@ class TransformTestCase(unittest.TestCase):
         pt = 1, 0
         tpt = transform_point(pt, cpos, rot, 1)
 
-        r2 = 0.5 ** 0.5
+        r2 = 0.5**0.5
         self.assertAlmostEqual(1.5 + r2, tpt[0])
         self.assertAlmostEqual(-1.5 + r2, tpt[1])
 

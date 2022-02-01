@@ -396,7 +396,7 @@ class FluxResultsEditor(BaseFluxVisualizationEditor, SelectionFigure):
             p.use = not p.use
 
         self._suppress_predict = False
-        self.predict_values()
+        self.predict_values(refresh=True)
 
     def _toggle_save_unknowns_button_fired(self):
         for p in self.selected_unknowns:
@@ -490,7 +490,7 @@ class BracketingFluxResultsEditor(FluxResultsEditor):
                 if p.hole_id in (obj.bracket_a, obj.bracket_b)
             ]
 
-            ws = array([1 / a.mean_jerr ** 2, 1 / b.mean_jerr ** 2])
+            ws = array([1 / a.mean_jerr**2, 1 / b.mean_jerr**2])
             vs = array([a.mean_j, b.mean_j])
             if self.plotter_options.use_weighted_fit:
 
