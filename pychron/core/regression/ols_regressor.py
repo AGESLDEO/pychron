@@ -343,7 +343,7 @@ class OLSRegressor(BaseRegressor):
             return [0, 0]
 
     def _engine_factory(self, fy, X, check_integrity=True):
-        return OLS(fy, X)
+        return OLS(fy, X, missing="drop")
 
     def _get_degree(self):
         return self._degree

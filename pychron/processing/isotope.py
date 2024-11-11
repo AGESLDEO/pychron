@@ -156,10 +156,19 @@ class BaseMeasurement(object):
                 xs = xs[-n:]
                 ys = ys[-n:]
 
-            xs = xs[isfinite(xs)]
-            ys = ys[isfinite(ys)]
+            # xs = xs[isfinite(xs)]
+            # ys = ys[isfinite(ys)]
+
+            print("xs is ",xs)
+            print("ys is ", ys)
+
+            idx = isfinite(xs) & isfinite(ys)
+
+            print("idx is", idx)
+
             try:
-                return polyfit(xs, ys, 1)[0]
+                print(polyfit(xs[idx], ys[idx], 1))
+                return polyfit(xs[idx], ys[idx], 1)[0]
             except BaseException as e:
                 print("get slope exception", e)
                 return 0
@@ -437,17 +446,19 @@ class IsotopicMeasurement(BaseMeasurement):
         #     return self._error
         # elif self.user_defined_error:
         #     return self._error
-
+        print("xs are ", self.xs)
         if (
             not self.use_stored_value
             and not self.user_defined_error
             and self.xs.shape[0] > 1
         ):
             v = self.regressor.predict_error(0)
+            print("using predict_error with v of ", v)
             if isnan(v) or isinf(v):
                 v = 0
             return v
         else:
+            print("using self._error of", self._error)
             return self._error
 
     @error.setter

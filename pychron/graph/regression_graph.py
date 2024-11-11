@@ -616,7 +616,8 @@ class RegressionGraph(Graph, RegressionContextMenuMixin):
         try:
             r.calculate()
             self._set_excluded(scatter, r)
-        except FitError:
+        except FitError as err:
+            print("Fit Error is ", err)
             f, e = convert_fit(scatter.ofit)
             r = self._poly_regress(scatter, r, f)
 
