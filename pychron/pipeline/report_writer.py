@@ -38,6 +38,7 @@ from pychron.pipeline.plot.editors.series_editor import SeriesEditor
 from pychron.pipeline.plot.plotter.series import ATTR_MAPPING
 from pychron.processing.analyses.analysis_group import AnalysisGroup
 
+INVALID_MSWD_CHR = "*"
 
 class BUReportSeriesOptionsManager(SeriesOptionsManager):
     id = "bu_report_series"

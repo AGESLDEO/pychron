@@ -48,7 +48,7 @@ class VisaCommunicator(Communicator):
         self.debug("opening visa usb communicator")
 
         address = self._make_address()
-        self.handle = resource_manager.get_instrument(address)
+        self.handle = resource_manager.open_resource(address)
         if self.handle is not None:
             self.simulation = False
             return True

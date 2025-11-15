@@ -710,68 +710,257 @@ class Pattern(HasTraits):
         raise NotImplementedError
 
 
+def rubberband_pattern(cx, cy, offset, length, rotation_deg, *, steps=None, close=True):
+    """
+    Generate a rectangle ("box") centered at (cx, cy) whose long axis is 'length'
+    along 'rotation_deg', and whose half-width on the short axis is 'offset'.
+    If offset == 0, this collapses to a single centered line segment.
+
+    Yields (x, y) points tracing the perimeter (or the center line if offset == 0).
+    """
+    cx = float(cx); cy = float(cy)
+    offset = float(offset); length = float(length)
+    theta = math.radians(float(rotation_deg))
+
+    # Unit vectors: long-axis (u) and short-axis (n)
+    ux, uy = math.cos(theta), math.sin(theta)
+    nx, ny = -uy, ux
+
+    halfL = 0.5 * length
+    halfW = offset  # symmetric on both sides of the short axis
+
+    # If no width, just return the center line
+    if halfW <= 0:
+        x1 = cx - halfL * ux
+        y1 = cy - halfL * uy
+        x2 = cx + halfL * ux
+        y2 = cy + halfL * uy
+        # density ~ 1 point per unit length, min 2
+        npts = max(2, int(round(max(2.0, length)))) if (steps is None) else max(2, int(steps))
+        for i in range(npts):
+            t = i / (npts - 1) if npts > 1 else 0.0
+            yield (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        return
+
+    # Rectangle corners (counterclockwise), centered at (cx, cy)
+    p_ll = (cx - halfL * ux - halfW * nx, cy - halfL * uy - halfW * ny)
+    p_lu = (cx - halfL * ux + halfW * nx, cy - halfL * uy + halfW * ny)
+    p_ru = (cx + halfL * ux + halfW * nx, cy + halfL * uy + halfW * ny)
+    p_rl = (cx + halfL * ux - halfW * nx, cy + halfL * uy - halfW * ny)
+
+    # Choose sampling density if not supplied
+    if steps is None:
+        long_pts  = max(2, int(round(max(2.0, length))))
+        short_pts = max(2, int(round(max(2.0, 2 * halfW))))
+    else:
+        perim = 2 * (length + 2 * halfW)
+        long_pts  = max(2, int(round(steps * (length / perim))))
+        short_pts = max(2, int(round(steps * ((2 * halfW) / perim))))
+        long_pts = max(long_pts, 2)
+        short_pts = max(short_pts, 2)
+
+    def lerp(a, b, n):
+        ax, ay = a; bx, by = b
+        for i in range(n):
+            t = i / (n - 1) if n > 1 else 0.0
+            yield (ax + t * (bx - ax), ay + t * (by - ay))
+
+    # Trace perimeter
+    for pt in lerp(p_ll, p_lu, short_pts):       # left edge
+        yield pt
+    for pt in list(lerp(p_lu, p_ru, long_pts))[1:]:
+        yield pt
+    for pt in list(lerp(p_ru, p_rl, short_pts))[1:]:
+        yield pt
+    edge = list(lerp(p_rl, p_ll, long_pts))[1:]
+    for pt in edge:
+        yield pt
+    if close and edge:
+        yield p_ll
+
+
 class RubberbandPattern(Pattern):
-    nominal_length = Range(0.0, 25.0, 15, mode="slider")
-    offset = Range(0.0, 5.0, mode="slider")
-    rotation = Range(0.0, 360.0, mode="slider")
-    xbounds = (-25, 25)
-    ybounds = (-25, 25)
-    endpoint1 = None
-    endpoint2 = None
+    # UI parameters
+    nominal_length = Range(0.0, 25.0, 15.0, mode="slider")
+    offset = Range(0.0, 5.0, 0.0, mode="slider")   # half-width on the short axis
+    rotation = Range(0.0, 360.0, 0.0, mode="slider")
+    stage_rotation_deg = Float(0.0)
+
+    # view bounds
+    xbounds = (-25.0, 25.0)
+    ybounds = (-25.0, 25.0)
 
     def set_stage_values(self, sm):
-        self.rotation = sm.canvas.calibration_item.rotation
-
-        ck = sm.temp_hole
-        # smap = sm.get_stage_map()
-        smap = sm.stage_map
-        obj = smap.get_hole(ck)
-
-        self.endpoint1 = smap.get_hole_pos(ck)
-        self.endpoint2 = smap.get_hole_pos(obj.associated_hole)
+        """
+        Read the base rotation from stage calibration and store it (degrees).
+        We don't overwrite the UI rotation; we add to it later.
+        """
+        try:
+            rot = float(sm.canvas.calibration_item.rotation)
+            # Convert if the calibration provides radians (common):
+            if abs(rot) <= 6.5:
+                rot = math.degrees(rot)
+            self.stage_rotation_deg = rot % 360.0
+        except Exception:
+            # keep previous value if unavailable
+            pass
 
     def get_parameter_group(self):
         return Group(
             Item("nominal_length", label="Length"),
-            Item("rotation"),
-            Item("offset"),
+            Item("rotation", label="Pattern Rotation"),
+            Item("offset", label="Half Width"),
             spring,
         )
 
     @property
     def length(self):
-        l = self.nominal_length
-        if self.endpoint1 and self.endpoint2:
-            l = abs(self.endpoint2[0] - self.endpoint1[0])
-        return l
+        return float(self.nominal_length)
 
     def pattern_generator_factory(self, **kw):
+        # ADD the UI rotation on top of the calibration rotation
+        total_rotation = (float(self.stage_rotation_deg) + float(self.rotation)) % 360.0
         return rubberband_pattern(
-            self.cx, self.cy, self.offset, self.length, self.rotation
+            float(self.cx),
+            float(self.cy),
+            float(self.offset),
+            float(self.length),
+            total_rotation,
         )
 
 
-class RasterRubberbandPattern(RubberbandPattern):
-    dx = Range(0.0, 5.0, 0.5, mode="slider")
-    single_pass = Bool(True)
+def raster_rubberband_pattern(
+    cx,
+    cy,
+    offset,
+    length,
+    rotation_deg,
+    raster_step,
+    *,
+    cross_points=None,
+):
+    """
+    Generate a boustrophedon (zig-zag) raster inside the same oriented rectangle:
+      - Long axis length = `length` along `rotation_deg`.
+      - Short axis half-width = `offset` (so total width = 2*offset).
+      - Each sweep traverses ACROSS the short axis, then advances along the long axis by `raster_step`,
+        then traverses back across the short axis in the opposite direction, and so on.
 
-    def pattern_generator_factory(self, **kw):
-        return raster_rubberband_pattern(
-            self.cx,
-            self.cy,
-            self.offset,
-            self.length,
-            self.dx,
-            self.rotation,
-            self.single_pass,
-        )
+    Yields (x, y) points along the path.
+    """
+    cx = float(cx); cy = float(cy)
+    offset = float(offset); length = float(length)
+    step = max(1e-6, float(raster_step))
+    theta = math.radians(float(rotation_deg))
+
+    # Basis vectors
+    ux, uy = math.cos(theta), math.sin(theta)  # long axis
+    nx, ny = -uy, ux                           # short axis
+
+    halfL = 0.5 * length
+    halfW = max(0.0, offset)
+
+    # Degenerate cases
+    if length <= 0:
+        # Just return center point
+        yield (cx, cy)
+        return
+    if halfW == 0.0:
+        # Collapse to the center line along long axis
+        x1 = cx - halfL * ux; y1 = cy - halfL * uy
+        x2 = cx + halfL * ux; y2 = cy + halfL * uy
+        npts = max(2, int(round(max(2.0, length))))
+        for i in range(npts):
+            t = i / (npts - 1) if npts > 1 else 0.0
+            yield (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        return
+
+    # Number of lanes along the long axis
+    n_lanes = int(math.floor(length / step)) + 1
+    # How many samples across each short-axis sweep (endpoints included)
+    if cross_points is None:
+        cross_points = max(2, int(round(max(2.0, 2.0 * halfW))))  # ~1 pt per unit width
+    cross_points = max(2, int(cross_points))
+
+    def sweep_along_short(center_pos_u, direction=1):
+        """
+        One sweep across the short axis at a fixed long-axis position.
+        direction=+1 goes from -halfW -> +halfW, direction=-1 reverses.
+        """
+        # Parameter s runs from -halfW to +halfW (or reverse)
+        for i in range(cross_points):
+            t = i / (cross_points - 1)
+            s = (-halfW) + t * (2.0 * halfW)
+            if direction < 0:
+                s = -s
+            # world coords: cx + u*center_pos_u + n*s
+            x = cx + center_pos_u * ux + s * nx
+            y = cy + center_pos_u * uy + s * ny
+            yield (x, y)
+
+    # Start at the long-axis minimum end (-halfL) and march to +halfL
+    current_u = -halfL
+    direction = +1  # first sweep goes from -W -> +W
+
+    for lane in range(n_lanes):
+        # Clamp last lane to the true end
+        if lane == n_lanes - 1:
+            current_u = +halfL
+        # Do one sweep across the short axis
+        for pt in sweep_along_short(current_u, direction):
+            yield pt
+        # Advance along long axis
+        current_u += step
+        # Flip sweep direction for next lane
+        direction *= -1
+
+
+class RasterRubberbandPattern(Pattern):
+    """
+    Same inputs/semantics as RubberbandPattern, but path rasters across the short axis
+    (zig-zag), stepping along the long axis by `raster_step` each pass.
+    """
+    # UI parameters
+    nominal_length = Range(0.0, 25.0, 15.0, mode="slider")
+    offset = Range(0.0, 5.0, 0.0, mode="slider")        # half-width on the short axis
+    rotation = Range(0.0, 360.0, 0.0, mode="slider")
+    raster_step = Range(0.01, 10.0, 1.0, mode="slider") # step along the long axis
+    stage_rotation_deg = Float(0.0)
+
+    xbounds = (-25.0, 25.0)
+    ybounds = (-25.0, 25.0)
+
+    def set_stage_values(self, sm):
+        try:
+            rot = float(sm.canvas.calibration_item.rotation)
+            if abs(rot) <= 6.5:
+                rot = math.degrees(rot)
+            self.stage_rotation_deg = rot % 360.0
+        except Exception:
+            pass
 
     def get_parameter_group(self):
         return Group(
-            Item("rotation"),
-            Item("offset"),
-            Item("dx"),
-            Item("single_pass", label="Single Pass"),
+            Item("nominal_length", label="Length"),
+            Item("rotation", label="Pattern Rotation"),
+            Item("offset", label="Half Width"),
+            Item("raster_step", label="Step (along length)"),
+            spring,
+        )
+
+    @property
+    def length(self):
+        return float(self.nominal_length)
+
+    def pattern_generator_factory(self, **kw):
+        total_rotation = (float(self.stage_rotation_deg) + float(self.rotation)) % 360.0
+        return raster_rubberband_pattern(
+            float(self.cx),
+            float(self.cy),
+            float(self.offset),
+            float(self.length),
+            total_rotation,
+            float(self.raster_step),
         )
 
 

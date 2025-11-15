@@ -18,7 +18,7 @@
 import logging
 import string
 
-from numpy import asarray, sqrt, sum, matrix, diagonal, array, exp, zeros, isfinite, abs, mean, ptp, polyfit, eye
+import numpy as np
 
 # ============= standard library imports ========================
 from scipy import optimize
@@ -35,6 +35,33 @@ class FitError(BaseException):
     pass
 
 
+def _calculate_linear_fit(fx, fy):
+
+    # Design matrix
+    matX = np.vstack([fx, np.ones_like(fx)]).T
+
+    # Perform the linear fit
+    beta, _, _, _ = np.linalg.lstsq(matX, fy, rcond=None)  # [slope, intercept]
+    slope, intercept = beta
+
+    # Compute residuals
+    residuals = fy - (slope * fx + intercept)
+    residual_variance = np.var(residuals, ddof=2)
+
+    # Compute covariance matrix
+    covariance_matrix = residual_variance * np.linalg.inv(matX.T @ matX)
+
+    return slope, intercept, covariance_matrix
+
+def _calculate_average(fy):
+
+    mean_y = np.mean(fy)
+    sem = np.std(fy) / np.sqrt(len(fy))
+    covariance_matrix = np.diag([sem ** 2, 0.0, sem ** 2])
+
+    return mean_y, covariance_matrix, sem
+
+
 class LeastSquaresRegressor(BaseRegressor):
     fitfunc = Callable
     initial_guess = List
@@ -44,12 +71,11 @@ class LeastSquaresRegressor(BaseRegressor):
 
     def construct_fitfunc(self, fitstr):
         fitstr = fitstr.lstrip("custom:").lower().split("_")[0]
-        import numexpr as ne
 
         def func(x, *args):
             ctx = dict(zip(string.ascii_lowercase[: len(args)][::-1], args))
             ctx["x"] = x
-            return ne.evaluate(fitstr, local_dict=ctx)
+            return np.ne.evaluate(fitstr, local_dict=ctx)
 
         self._nargs = 2
         self.fitfunc = func
@@ -61,7 +87,7 @@ class LeastSquaresRegressor(BaseRegressor):
         perform constrained optimization instead.
         """
         # Define threshold for a << c
-        threshold_ratio = 0.01  # Adjust this value as needed
+        threshold = 10  # Adjust this value as needed
 
         cxs = self.pre_clean_xs
         cys = self.pre_clean_ys
@@ -74,28 +100,32 @@ class LeastSquaresRegressor(BaseRegressor):
 
         if not filtering:
             # prevent infinite recursion
-            fx, fy = self.calculate_filtered_data()
+            self.fx, self.fy = self.calculate_filtered_data()
         else:
-            fx, fy = cxs, cys
+            self.fx, self.fy = cxs, cys
         try:
             initial_guess = self._calculate_initial_guess()
-            valid = isfinite(fx) & isfinite(fy)
-            print("fx array ", fx[valid])
-            print("fy array ", fy[valid])
+            valid = np.isfinite(self.fx) & np.isfinite(self.fy)
+            self.fx = self.fx[valid]
+            self.fy = self.fy[valid]
             coeffs, cov = optimize.curve_fit(
-                self.fitfunc, fx[valid], fy[valid], p0=initial_guess
+                self.fitfunc, self.fx, self.fy, p0=initial_guess
             )
-            # This needs nan_policy="omit" but I have to update python to update scipy to 1.11
-            print("fit function is ", self.fitfunc)
-            print("coeffs are ", coeffs)
+            # This needs nan_policy="omit" but I have to update python to update scipy to 1.11 so did it manually
             self._coefficients = list(coeffs)
             self._covariance = cov
-            self._coefficient_errors = list(sqrt(diagonal(cov)))
+            self._coefficient_errors = list(np.sqrt(np.diagonal(cov)))
             print("coeff errors are ",self._coefficient_errors)
+            if not self._covariance_matrix_test(self.fx, self.fy):
+                return
 
             # Check if a << c
-            if self._coefficients[0] < threshold_ratio * self._coefficients[2]:
+            if self._coefficients[0] < -1 * threshold * abs(self._coefficients[2]):
                 raise ValueError("a is much smaller than c; switching to constrained optimization.")
+
+            # Check if errors are reasonable
+            if any(np.asarray(self._coefficient_errors)/np.asarray(self._coefficients) > 1):
+                raise ValueError("coefficient errors are unreasonable; switching to constrained optimization.")
 
         except ValueError:
             # Log the transition
@@ -103,11 +133,11 @@ class LeastSquaresRegressor(BaseRegressor):
 
             # Define the objective function for constrained optimization
             def objective(params):
-                return sum((self.ys - self.fitfunc(self.xs, *params)) ** 2)
+                return np.sum((self.fy - self.fitfunc(self.fx, *params)) ** 2)
 
             # Set bounds for constrained optimization
             bounds = [(0, None),  # a >= 0
-                      (0, None),  # b >= 0
+                      (None, None),  # b >= 0
                       (0, None)]  # c >= 0
 
             # Perform constrained optimization
@@ -120,25 +150,18 @@ class LeastSquaresRegressor(BaseRegressor):
             else:
                 self._covariance = np.zeros((3, 3))  # Placeholder if Hessian is unavailable
 
+            self._coefficient_errors = list(np.sqrt(np.diagonal(cov)))
+
+            if not self._covariance_matrix_test(self.fx, self.fy):
+                return
+
         except RuntimeError:
             # Log the failure
             logger.warning("Exponential fit failed to converge. Falling back to linear fit.")
-            self.fit = "linear"
-            # Fallback to linear fit using numpy.polyfit
-            try:
-                linear_coeffs = polyfit(fx, fy, 1)  # Linear fit y = mx + b
-                m, b = linear_coeffs
-                self._coefficients = [b, m, 0]  # Map to equivalent structure [c, b, a]
-                self._covariance = zeros((3, 3))  # Minimal covariance for linear fit
-                self._coefficient_errors = [0, 0, 0]
-            except Exception as e:
-                # Final fallback to mean if linear fit also fails
-                logger.error(f"Linear fit failed: {e}")
-                self._coefficients = [mean(fy), 0, 0]
-                self._covariance = eye(3)
+            self._try_fallbacks(self.fx, self.fy)
 
     def _calculate_initial_guess(self):
-        return zeros(self._nargs)
+        return np.zeros(self._nargs)
 
     def _calculate_coefficients(self):
         return self._coefficients
@@ -146,15 +169,76 @@ class LeastSquaresRegressor(BaseRegressor):
     def _calculate_coefficient_errors(self):
         return self._coefficient_errors
 
+    def _try_fallbacks(self, fx, fy):
+        try:
+            print("Attempting linear fit fallback...")
+            # Fallback to linear fit using numpy.polyfit
+            self.fit = "linear"
+            [slope, intercept, covariance_matrix] = _calculate_linear_fit(fx, fy)
+
+            # Assign results
+            print(f"Linear fit succeeded: slope={slope}, intercept={intercept}")
+            self._coefficients = [slope, 0.0, intercept]
+            self._covariance = covariance_matrix
+            self._coefficient_errors = [np.sqrt(covariance_matrix[0, 0]), np.sqrt(covariance_matrix[1, 1])]
+
+        except Exception as e:
+            print(f"Linear fit failed with error: {e}. Falling back to average.")
+            self.fit = "average"
+            [mean_y, covariance_matrix, sem] = _calculate_average(fy)
+
+            # Assign results
+            print(f"Average fallback: mean_y={mean_y}, sem={sem}")
+            self._coefficients = [0.0, 0.0, mean_y]
+            self._covariance = covariance_matrix
+            self._coefficient_errors = [0.0, 0.0, sem]
+
+    def _covariance_matrix_test(self, fx, fy):
+        """
+        Test the validity of the covariance matrix and handle fallback to an average fit if needed.
+
+        Parameters:
+            fy (array): The dependent variable data used in the fit.
+
+        Returns:
+            bool: True if the covariance matrix is valid, False if it failed and the fallback was applied.
+        """
+        if self._covariance is not None:
+            diagonal_elements = np.diag(self._covariance)
+            if np.any(diagonal_elements > 1e6) or np.any(diagonal_elements < 0) or any(np.asarray(self._coefficient_errors)/np.asarray(self._coefficients) > 1):
+                print("Covariance matrix indicates unreliable fit. Falling back to linear.")
+                self.fit = "linear"
+                self._try_fallbacks(fx, fy)
+                # [mean_y, covariance_matrix, sem] = _calculate_average(fy)
+                #
+                # # Assign results
+                # self._coefficients = [0.0, 0.0, mean_y]
+                # self._covariance = covariance_matrix
+                # self._coefficient_errors = [0.0, 0.0, sem]
+                return False  # Covariance matrix failed the test
+            return True  # Covariance matrix passed the test
+        else:
+            return False
+
     def predict(self, x):
         return_single = False
         if not hasattr(x, "__iter__"):
             x = [x]
             return_single = True
 
-        x = asarray(x)
+        x = np.asarray(x)
 
-        fx = self.fitfunc(x, *self._coefficients)
+        if self.fit == "exponential":
+            # Use the exponential fit function
+            fx = self.fitfunc(x, *self._coefficients)
+        elif self.fit == "linear":
+            # Linear fit: y = slope * x + intercept
+            slope, intercept = self._coefficients[:2]
+            fx = slope * x + intercept
+        else:
+            # Fallback to the average
+            fx = np.full_like(x, self._coefficients[0], dtype=float)
+
         if return_single:
             fx = fx[0]
 
@@ -166,7 +250,7 @@ class LeastSquaresRegressor(BaseRegressor):
     # New mostly chatgpt version of predict_errors as I try to troubleshoot large error envelopes
     def predict_error(self, x, error_calc="sem"):
         """
-        Calculate prediction error for an exponential fit.
+        Calculate prediction error for the current fit.
 
         Args:
             x (array-like): Input values for which errors are predicted.
@@ -180,77 +264,54 @@ class LeastSquaresRegressor(BaseRegressor):
             x = [x]
             return_single = True
 
-        x = asarray(x)
+        x = np.asarray(x)
 
-        # Sensitivity matrix (Jacobian)
-        sensitivity_matrix = zeros((len(x), len(self._coefficients)))
-        sensitivity_matrix[:, 0] = exp(-self._coefficients[1] * x)  # ∂y/∂a
-        sensitivity_matrix[:, 1] = -self._coefficients[0] * x * exp(
-            -self._coefficients[1] * x
-        )  # ∂y/∂b
-        sensitivity_matrix[:, 2] = 1  # ∂y/∂c
+        # Construct the sensitivity matrix based on the fit type
+        if self.fit == "exponential":
+            sensitivity_matrix = np.zeros((len(x), 3))
+            sensitivity_matrix[:, 0] = np.exp(-self._coefficients[1] * x)  # ∂y/∂a
+            sensitivity_matrix[:, 1] = -self._coefficients[0] * x * np.exp(
+                -self._coefficients[1] * x
+            )  # ∂y/∂b
+            sensitivity_matrix[:, 2] = 1  # ∂y/∂c
 
-        # Propagate the covariance matrix
-        parameter_errors = sqrt(sum(sensitivity_matrix @ self._covariance * sensitivity_matrix, axis=1))
+            # Propagate the covariance matrix
+            parameter_errors = np.sqrt(
+                np.sum(sensitivity_matrix @ self._covariance * sensitivity_matrix, axis=1)
+            )
 
-        # Calculate residual-based standard error
-        residuals = self.ys - self.fitfunc(self.xs, *self._coefficients)
-        standard_error = sqrt(sum(residuals ** 2) / (len(self.ys) - len(self._coefficients)))
+            # Calculate residuals only for exponential fits
+            residuals = self.ys - self.fitfunc(self.xs, *self._coefficients)
+            standard_error = np.sqrt(np.sum(residuals ** 2) / (len(self.ys) - len(self._coefficients)))
 
-        # Compute reduced chi-squared for regularization
-        chi_squared_reduced = sum(residuals ** 2) / (len(self.ys) - len(self._coefficients))
-        if chi_squared_reduced < 1:
-            standard_error *= chi_squared_reduced  # Reduce influence of residual error
+        elif self.fit == "linear":
+            sensitivity_matrix = np.zeros((len(x), 2))
+            sensitivity_matrix[:, 0] = x  # ∂y/∂slope
+            sensitivity_matrix[:, 1] = 1  # ∂y/∂intercept
+
+            # Propagate the covariance matrix
+            parameter_errors = np.sqrt(
+                np.sum(sensitivity_matrix @ self._covariance * sensitivity_matrix, axis=1)
+            )
+            standard_error = 0  # Linear fits typically do not calculate residual error here
+
+        else:  # Average fit
+            # Standard error of the mean (SEM) for average fit
+            sem = np.std(self.ys) / np.sqrt(len(self.ys))
+            parameter_errors = np.full_like(x, sem, dtype=float)  # SEM as the error
+            standard_error = sem
 
         # Combine parameter uncertainty with residual-based error
-        combined_errors = sqrt(parameter_errors ** 2 + standard_error ** 2)
+        combined_errors = np.sqrt(parameter_errors ** 2 + standard_error ** 2)
 
         if return_single:
             return combined_errors[0]
         return combined_errors
 
-    # def predict_error(self, x, error_calc="sem"):
-    #     """
-    #     returns percent error
-    #     """
-    #     print("x is ", x)
-    #     return_single = False
-    #     if not hasattr(x, "__iter__"):
-    #         x = [x]
-    #         return_single = True
-    #
-    #     sef = self.calculate_standard_error_fit()
-    #     r, _ = self._covariance.shape
-    #
-    #     def calc_error(xi):
-    #         Xk = matrix(
-    #             [
-    #                 xi,
-    #             ]
-    #             * r
-    #         ).T
-    #
-    #         varY_hat = Xk.T * self._covariance * Xk
-    #         if error_calc == "sem":
-    #             se = sef * sqrt(varY_hat)
-    #         else:
-    #             se = sqrt(sef**2 + sef**2 * varY_hat)
-    #         print("error is ", se[0, 0])
-    #         return se[0, 0]
-    #
-    #     fx = array([calc_error(xi) for xi in x])
-    #     # fx = ys * fx / 100.
-    #     print("error array is ", fx)
-    #     if return_single:
-    #         fx = fx[0]
-    #     print("return single is ",return_single)
-    #     return fx
-
-
 class ExponentialRegressor(LeastSquaresRegressor):
     def __init__(self, *args, **kw):
         def fitfunc(x, a, b, c):
-            return a * exp(-b * x) + c
+            return a * np.exp(-b * x) + c
 
         self.fitfunc = fitfunc
         self.fit = "exponential"
@@ -261,19 +322,21 @@ class ExponentialRegressor(LeastSquaresRegressor):
         # Trying to make it more robust with chatgpt help due to error envelopes blowing up
         # Estimate the baseline (C) as the minimum or maximum value of y
         if len(self.ys) > 3:
-            ig_c = mean(self.ys[-3:])  # Average of the last few points (assumes steady behavior)
+            ig_c = np.mean(self.ys[-3:])  # Average of the last few points (assumes steady behavior)
         else:
             ig_c = self.ys[-1] # If we don't have at least four points, just use the last point
 
         # Estimate the amplitude (A) as the difference between the first point and the baseline
         ig_a = self.ys[0] - ig_c
 
-        # Estimate the decay/growth rate (B) based on the trend of y
+        # Estimate the decay/growth rate (B) based on half-max behavior
         # Use a log ratio to estimate the rate of change over the range of x
-        if len(self.xs) > 1:
-            ig_b = abs(ig_a) / (ptp(self.xs))  # Default to a positive rate
+        half_max = ig_a/2 + ig_c
+        decay_index = np.argmax(self.ys < half_max)
+        if len(self.ys) > 5 and decay_index > 0:
+            ig_b = np.log(2) / (self.xs[decay_index] - self.xs[0])
         else:
-            ig_b = 0.1  # Default to a small positive rate for small datasets
+            ig_b = 0.1  # Default to a small positive rate
 
         # Handle edge cases where the data does not vary
         if ig_a == 0:

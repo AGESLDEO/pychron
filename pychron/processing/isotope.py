@@ -438,6 +438,8 @@ class IsotopicMeasurement(BaseMeasurement):
                 v = 0
             return v
         else:
+            print("name is ", self.name)
+            print("_value is ", self._value)
             return self._value
 
     @property

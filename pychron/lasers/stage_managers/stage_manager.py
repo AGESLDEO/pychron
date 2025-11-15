@@ -20,7 +20,7 @@ import time
 from numpy import array, asarray
 
 # =============enthought library imports=======================
-from traits.api import DelegatesTo, Instance, Button, List, String, Event, Bool
+from traits.api import DelegatesTo, Instance, Button, List, String, Event, Bool, Float
 
 from pychron.canvas.canvas2D.laser_tray_canvas import LaserTrayCanvas
 from pychron.core.geometry.convex_hull import convex_hull

@@ -50,7 +50,9 @@ class ChromiumLaserManager(EthernetLaserManager):
 
     def fire_laser(self):
         self.info("fire laser")
-        self._ask("laser.fire")
+        ret = self._ask("laser.fire")
+        if ret is None:
+            self._ask("laser.fire")
 
     def extract(self, value, units=None, tol=0.1, fire_laser=True, **kw):
         if units is None:
@@ -81,6 +83,7 @@ class ChromiumLaserManager(EthernetLaserManager):
 
     def set_laser_power(self, v):
 
+        time.sleep(0.5)
         return self._ask("laser.output {}".format(v))
 
     def enable_laser(self, **kw):
@@ -104,6 +107,11 @@ class ChromiumLaserManager(EthernetLaserManager):
 
     def linear_move(self, x, y, block=False, *args, **kw):
         self._move_to_position((x, y), block=block)
+
+    def pattern_move(self, x, y, block=False, *args, **kw):
+        self._move_to_position_without_looking((x, y), block=block)
+        # patterns seem to assume a second delay
+        time.sleep(0.9)
 
     def stop(self):
         self._ask("stage.stop")
@@ -171,6 +179,38 @@ class ChromiumLaserManager(EthernetLaserManager):
         self._alive = False
         self.update_position()
 
+    def _move_to_position_without_looking(self, pos, block=True, *args, **kw):
+        sm = self.stage_manager
+        try:
+            x, y = self._get_hole_xy(pos)
+        except ValueError:
+            return
+
+        z = self._z
+        xs = 5000
+        ys = 5000
+        zs = 100
+
+        self._alive = True
+        self.debug("pos={}, x={}, y={}".format(pos, x, y))
+
+        xm = x * 1000
+        ym = y * 1000
+        zm = z * 1000
+        if sm.use_sign_position_correction:
+            xm *= sm.x_sign
+            ym *= sm.y_sign
+            zm *= sm.z_sign
+
+        cmd = "stage.moveto {:0.0f},{:0.0f},{:0.0f},{:0.0f},{:0.0f},{:0.0f}".format(
+            xm, ym, zm, xs, ys, zs
+        )
+        self.info("sending {}".format(cmd))
+        time.sleep(0.2)
+        self._ask(cmd)
+
+        return self._moving(xm, ym, zm, block)
+
     def _move_to_position(self, pos, block=True, *args, **kw):
         sm = self.stage_manager
         try:
@@ -198,6 +238,7 @@ class ChromiumLaserManager(EthernetLaserManager):
             xm, ym, zm, xs, ys, zs
         )
         self.info("sending {}".format(cmd))
+        time.sleep(0.2)
         self._ask(cmd)
 
         time.sleep(1)

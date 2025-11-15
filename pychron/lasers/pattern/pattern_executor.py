@@ -314,7 +314,8 @@ class PatternExecutor(Patternable):
                     continue
 
                 self.debug("Pattern Point. {},{}: {},{}".format(iteration, i, x, y))
-                controller.linear_move(x, y, block=True, velocity=pattern.velocity)
+                # wrote new pattern move function without checking to avoid time delays
+                controller.pattern_move(x, y, block=False, velocity=pattern.velocity)
 
     def _execute_contour(self, controller, pattern):
         for ni in range(pattern.nsteps):
